@@ -19,6 +19,10 @@ app.use("/dish", dishRoutes);
 app.use("/order", orderRoutes);
 app.use("/user", userRoutes);
 
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
 app.listen(process.env.PORT || 5000, () =>
   console.log(`Server running on port ${process.env.PORT || 5000}`)
 );
