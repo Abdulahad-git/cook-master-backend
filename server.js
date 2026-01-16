@@ -6,6 +6,8 @@ import authRoutes from "./routes/authRoutes.js";
 import dishRoutes from "./routes/dishRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
+import uploadRoutes from "./routes/uploadRoutes.js";
+import comboRoutes from "./routes/comboRoutes.js";
 
 dotenv.config();
 connectDB();
@@ -18,6 +20,8 @@ app.use("/auth", authRoutes);
 app.use("/dish", dishRoutes);
 app.use("/order", orderRoutes);
 app.use("/user", userRoutes);
+app.use("/combos", comboRoutes);
+app.use("/cloudinary", uploadRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).send("OK");

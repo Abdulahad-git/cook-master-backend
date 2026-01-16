@@ -6,20 +6,35 @@ import Dish from "../models/Dish.js";
  */
 export const createDish = async (req, res) => {
   try {
-    console.log(req.user);
     const dish = await Dish.create({
       cookId: req.user.id,
+
       name: req.body.name,
       description: req.body.description,
+
+      category: req.body.category, // sweet, dessert, meal, etc.
+      type: req.body.type, // veg, non-veg, egg
+
       unit: req.body.unit,
-      pricePerUnit: req.body.pricePerUnit,
+
+      pricePerUnit: {
+        withMaterials: req.body.pricePerUnit?.withMaterials,
+        withoutMaterials: req.body.pricePerUnit?.withoutMaterials,
+      },
+
       minOrderQty: req.body.minOrderQty,
       imageUrl: req.body.imageUrl,
     });
 
-    res.status(201).json(dish);
+    res.status(201).json({
+      success: true,
+      dish,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 

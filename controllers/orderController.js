@@ -4,62 +4,96 @@ import mongoose from "mongoose";
 import { generateQuotationPDF } from "../pdf/builders/quotation.js";
 
 /* ----------------------------- helpers ----------------------------- */
-const calculateOrderTotals = (items, orderDiscount, additionalCharges = 0) => {
+
+/**
+ * Shared logic to calculate totals for a single line item (Dish or Combo)
+ */
+const calculateLineItem = (item) => {
+  const itemSubtotal = (item.qty || 0) * (item.pricePerUnitSnapshot || 0);
+
+  let discountAmount = 0;
+  if (item.discount?.type === "rupees") {
+    discountAmount = item.discount.amount || 0;
+  } else if (item.discount?.type === "percent") {
+    discountAmount = (itemSubtotal * (item.discount.amount || 0)) / 100;
+  }
+
+  const finalAmount = itemSubtotal - discountAmount;
+
+  return {
+    ...item,
+    itemSubtotal,
+    finalAmount,
+  };
+};
+
+const calculateOrderTotals = (
+  items = [],
+  combos = [],
+  orderDiscount,
+  additionalCharges = 0
+) => {
   let subtotal = 0;
 
+  // 1. Process Dishes
   const computedItems = items.map((item) => {
-    const itemSubtotal = item.qty * item.pricePerUnitSnapshot;
-
-    let discountAmount = 0;
-    if (item.discount?.type === "rupees") {
-      discountAmount = item.discount.amount;
-    } else if (item.discount?.type === "percent") {
-      discountAmount = (itemSubtotal * item.discount.amount) / 100;
-    }
-
-    const finalAmount = itemSubtotal - discountAmount;
-    subtotal += finalAmount;
-
-    return {
-      ...item,
-      itemSubtotal,
-      finalAmount,
-    };
+    const computed = calculateLineItem(item);
+    subtotal += computed.finalAmount;
+    return computed;
   });
 
+  // 2. Process Combos
+  const computedCombos = combos.map((combo) => {
+    const computed = calculateLineItem(combo);
+    subtotal += computed.finalAmount;
+    return computed;
+  });
+
+  // 3. Process Global Order Discount
   let orderDiscountAmount = 0;
   if (orderDiscount?.type === "rupees") {
-    orderDiscountAmount = orderDiscount.amount;
+    orderDiscountAmount = orderDiscount.amount || 0;
   } else if (orderDiscount?.type === "percent") {
-    orderDiscountAmount = (subtotal * orderDiscount.amount) / 100;
+    orderDiscountAmount = (subtotal * (orderDiscount.amount || 0)) / 100;
   }
 
   const total = subtotal - orderDiscountAmount + Number(additionalCharges || 0);
 
-  return { computedItems, subtotal, total };
+  return {
+    computedItems,
+    computedCombos,
+    subtotal,
+    total,
+  };
 };
 
 /* ----------------------------- CREATE ----------------------------- */
-// POST /api/orders
 export const createOrder = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const { items, orderDiscount, additionalCharges } = req.body;
-
-    const { computedItems, subtotal, total } = calculateOrderTotals(
-      items,
+    // Destructure combos from request body
+    const {
+      items = [],
+      combos = [],
       orderDiscount,
-      additionalCharges
-    );
+      additionalCharges,
+      orderType,
+    } = req.body;
+
+    // Calculate everything
+    const { computedItems, computedCombos, subtotal, total } =
+      calculateOrderTotals(items, combos, orderDiscount, additionalCharges);
 
     const [order] = await Order.create(
       [
         {
           ...req.body,
           cookId: req.user.id,
+          orderType: orderType || "WITH_MATERIAL",
           items: computedItems,
+          combos: computedCombos, // 🔹 Added combos here
           subtotal,
           total,
         },
@@ -72,7 +106,7 @@ export const createOrder = async (req, res) => {
 
     res.status(201).json(order);
   } catch (error) {
-    console.log(error);
+    console.error("Order Creation Error:", error);
     await session.abortTransaction();
     session.endSession();
     res.status(500).json({ message: error.message });
@@ -113,19 +147,50 @@ export const getOrderById = async (req, res) => {
 };
 
 /* ----------------------------- UPDATE ----------------------------- */
-// PUT /api/orders/:id
 export const updateOrder = async (req, res) => {
   try {
+    const { items, combos, orderDiscount, additionalCharges } = req.body;
     let updates = { ...req.body };
 
-    if (req.body.items) {
-      const { computedItems, subtotal, total } = calculateOrderTotals(
-        req.body.items,
-        req.body.orderDiscount,
-        req.body.additionalCharges
-      );
+    // 1. Check if any pricing-related fields are being updated
+    const isPricingUpdate =
+      items !== undefined ||
+      combos !== undefined ||
+      orderDiscount !== undefined ||
+      additionalCharges !== undefined;
 
+    if (isPricingUpdate) {
+      // 2. Fetch the existing order to get current values for fields not provided in the request
+      // This ensures that if you update "items", the "combos" already in the DB aren't lost in the math.
+      const existingOrder = await Order.findOne({
+        _id: req.params.id,
+        cookId: req.user.id,
+      });
+
+      if (!existingOrder) {
+        return res
+          .status(404)
+          .json({ message: "Order not found or unauthorized" });
+      }
+
+      // 3. Use new values from req.body if they exist, otherwise fallback to existing values in DB
+      const finalItems = items ?? existingOrder.items;
+      const finalCombos = combos ?? existingOrder.combos;
+      const finalDiscount = orderDiscount ?? existingOrder.orderDiscount;
+      const finalCharges = additionalCharges ?? existingOrder.additionalCharges;
+
+      // 4. Recalculate using the helper function
+      const { computedItems, computedCombos, subtotal, total } =
+        calculateOrderTotals(
+          finalItems,
+          finalCombos,
+          finalDiscount,
+          finalCharges
+        );
+
+      // 5. Apply calculated values to the update object
       updates.items = computedItems;
+      updates.combos = computedCombos;
       updates.subtotal = subtotal;
       updates.total = total;
     }
@@ -146,6 +211,7 @@ export const updateOrder = async (req, res) => {
 
     res.json(order);
   } catch (error) {
+    console.error("Order Update Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -197,26 +263,29 @@ export const deleteOrder = async (req, res) => {
 
 /**
  * GET orders with filters + infinite scroll
- *
- * Query params:
- *  - status=DRAFT|COMPLETED
- *  - fromDate=2025-01-01
- *  - toDate=2025-01-31
- *  - cursor=createdAt (ISO string)
- *  - limit=10
- *
- * Route:
- *  GET /api/orders/query
+ * Query params updated to include orderType
  */
 export const queryOrders = async (req, res) => {
   try {
-    const { status, fromDate, toDate, cursor, limit = 10 } = req.query;
+    const {
+      status,
+      fromDate,
+      toDate,
+      cursor,
+      limit = 10,
+      orderType,
+    } = req.query;
 
     const query = { cookId: req.user.id };
 
     /* ---------- status filter ---------- */
     if (status) {
       query.status = status;
+    }
+
+    /* ---------- order type filter ---------- */
+    if (orderType) {
+      query.orderType = orderType; // 🔹 Allow filtering by WITH_MATERIAL or WITHOUT_MATERIAL
     }
 
     /* ---------- date range filter ---------- */
@@ -246,7 +315,7 @@ export const queryOrders = async (req, res) => {
 
     const orders = await Order.find(query)
       .sort({ createdAt: -1 })
-      .limit(Number(limit) + 1); // fetch extra for next cursor
+      .limit(Number(limit) + 1);
 
     const hasMore = orders.length > limit;
     if (hasMore) orders.pop();

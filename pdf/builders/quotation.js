@@ -12,7 +12,7 @@ export const generateQuotationPDF = (order, cook) => {
       const doc = new PDFDocument({ margin: 50, size: "A4" });
       const buffers = [];
 
-      // 2. Define Font Paths (Adjust '../fonts' if your folder structure differs)
+      // 2. Define Font Paths
       const regularFontPath = path.join(
         __dirname,
         "../../fonts/Roboto-Regular.ttf"
@@ -20,25 +20,26 @@ export const generateQuotationPDF = (order, cook) => {
       const boldFontPath = path.join(__dirname, "../../fonts/Roboto-Bold.ttf");
 
       // 3. Register Fonts
-      // We register them as 'Roboto' and 'Roboto-Bold' to reference them later
       doc.registerFont("Roboto", regularFontPath);
       doc.registerFont("Roboto-Bold", boldFontPath);
 
-      // 4. Set Initial Font
       doc.font("Roboto");
 
-      // 5. Data Collection
+      // 4. Data Collection
       doc.on("data", (chunk) => buffers.push(chunk));
       doc.on("end", () => resolve(Buffer.concat(buffers)));
       doc.on("error", (err) => reject(err));
 
-      // 6. Generate Content
+      // 5. Generate Content
       generateHeader(doc, cook);
       generateOrderInfo(doc, order);
-      generateInvoiceTable(doc, order);
+
+      // We capture the returned Y position to know where to start the summary
+      const tableEndY = generateInvoiceTable(doc, order);
+
+      generateSummary(doc, order, tableEndY);
       generateFooter(doc);
 
-      // 7. Finalize
       doc.end();
     } catch (err) {
       reject(err);
@@ -70,16 +71,15 @@ function generateHeader(doc, cook) {
   doc
     .fillColor("#444444")
     .fontSize(20)
-    .font("Roboto-Bold") // Use Bold for Title
+    .font("Roboto-Bold")
     .text(cook.businessName || cook.name, 50, 57)
-    .font("Roboto") // Switch back to Regular
+    .font("Roboto")
     .fontSize(10)
     .text(cook.name, 50, 80)
     .text(cook.address || "Address Not Available", 50, 95)
     .text(`${cook.email} | ${cook.phone}`, 50, 110)
     .moveDown();
 
-  // Orange Divider
   doc
     .strokeColor("#fc8019")
     .lineWidth(2)
@@ -91,151 +91,216 @@ function generateHeader(doc, cook) {
 function generateOrderInfo(doc, order) {
   doc
     .fillColor("#444444")
-    .fontSize(20)
+    .fontSize(18)
     .font("Roboto-Bold")
     .text("QUOTATION", 50, 160);
-
   generateHr(doc, 185);
 
-  const customerInformationTop = 200;
+  const top = 200;
+  doc.fontSize(10).font("Roboto");
 
+  // Left Side
   doc
-    .fontSize(10)
-    .font("Roboto") // Ensure Regular font starts here
-    .text("Order No:", 50, customerInformationTop)
-    .font("Roboto-Bold") // CHANGED from Helvetica-Bold
-    .text(order.orderNo || "PENDING", 150, customerInformationTop)
-    .font("Roboto") // CHANGED from Helvetica
-    .text("Order Date:", 50, customerInformationTop + 15)
-    .text(formatDate(order.createdAt), 150, customerInformationTop + 15)
-    .text("Event Date:", 50, customerInformationTop + 30)
-    .text(formatDate(order.eventDate), 150, customerInformationTop + 30)
-    .text("Status:", 50, customerInformationTop + 45)
-    .text(order.status.replace("_", " "), 150, customerInformationTop + 45)
+    .text("Order No:", 50, top)
+    .font("Roboto-Bold")
+    .text(order.orderNo || "DRAFT", 120, top);
+  doc
+    .font("Roboto")
+    .text("Order Date:", 50, top + 15)
+    .text(formatDate(order.createdAt), 120, top + 15);
+  doc
+    .text("Event Date:", 50, top + 30)
+    .text(formatDate(order.eventDate), 120, top + 30);
 
-    .font("Roboto-Bold") // CHANGED from Helvetica-Bold
-    .text(order.clientName, 300, customerInformationTop)
-    .font("Roboto") // CHANGED from Helvetica
-    .text(order.clientPhone || "", 300, customerInformationTop + 15)
-    .moveDown();
+  // Right Side (Client)
+  doc.font("Roboto-Bold").text("CLIENT DETAILS:", 350, top);
+  doc.font("Roboto").text(order.clientName, 350, top + 15);
+  doc.text(order.clientPhone || "No Phone Provided", 350, top + 30);
+  doc.text(`Status: ${order.status.replace("_", " ")}`, 350, top + 45);
 
   generateHr(doc, 265);
 }
 
 function generateInvoiceTable(doc, order) {
-  let i;
-  const invoiceTableTop = 330;
+  let currentY = 300;
 
-  doc.font("Roboto-Bold"); // CHANGED from Helvetica-Bold
+  // Header
+  doc.font("Roboto-Bold");
   generateTableRow(
     doc,
-    invoiceTableTop,
-    "Item",
+    currentY,
+    "Item Description",
     "Unit",
     "Qty",
     "Price",
     "Total"
   );
-  generateHr(doc, invoiceTableTop + 20);
-  doc.font("Roboto"); // CHANGED from Helvetica
+  generateHr(doc, currentY + 15);
+  doc.font("Roboto");
+  currentY += 25;
 
-  let position = 0;
+  // 1. Render COMBOS First
+  if (order.combos && order.combos.length > 0) {
+    doc.font("Roboto-Bold").fillColor("#fc8019").text("COMBOS", 50, currentY);
+    doc.fillColor("#444444").font("Roboto");
+    currentY += 20;
 
-  // -- ITEMS LOOP --
-  for (i = 0; i < order.items.length; i++) {
-    const item = order.items[i];
-    position = invoiceTableTop + (i + 1) * 30;
+    order.combos.forEach((combo) => {
+      if (currentY > 700) {
+        doc.addPage();
+        currentY = 50;
+      }
 
-    // Check for page break
-    if (position > 700) {
-      doc.addPage();
-      doc.font("Roboto"); // Reset font after new page
-      position = 50;
-    }
+      // Main Combo Row
+      generateTableRow(
+        doc,
+        currentY,
+        `Combo: ${combo.nameSnapshot}`,
+        "pkg",
+        combo.qty,
+        formatCurrency(combo.pricePerUnitSnapshot),
+        formatCurrency(combo.itemSubtotal)
+      );
 
-    generateTableRow(
-      doc,
-      position,
-      item.nameSnapshot,
-      item.unit,
-      item.qty,
-      formatCurrency(item.pricePerUnitSnapshot),
-      formatCurrency(item.itemSubtotal)
-    );
+      // --- "INCLUDES" MOVED TO THE VERY LEFT ---
+      if (combo.dishesSnapshot && combo.dishesSnapshot.length > 0) {
+        currentY += 15; // Small vertical gap after the combo name
 
-    generateHr(doc, position + 20);
+        const dishList = combo.dishesSnapshot
+          .map((d) => `${d.quantity}x ${d.name}`)
+          .join(", ");
+
+        const includesText = `Includes: ${dishList}`;
+        // Width 220 ensures it stays within the "Item Description" column
+        const textOptions = { width: 220, align: "left" };
+
+        const textHeight = doc.heightOfString(includesText, textOptions);
+
+        doc
+          .fontSize(8)
+          .fillColor("#777777")
+          .text(includesText, 50, currentY, textOptions); // X set to 50 (Very Left)
+
+        doc.fontSize(10).fillColor("#444444");
+        currentY += textHeight;
+      }
+
+      generateHr(doc, currentY + 10);
+      currentY += 25;
+    });
   }
 
-  // -- TOTALS SECTION --
-  const subtotalPosition = position + 40;
+  // 2. Render INDIVIDUAL ITEMS
+  if (order.items && order.items.length > 0) {
+    currentY += 10;
+    doc
+      .font("Roboto-Bold")
+      .fillColor("#fc8019")
+      .text("INDIVIDUAL DISHES", 50, currentY);
+    doc.fillColor("#444444").font("Roboto");
+    currentY += 20;
 
-  generateTableRow(
-    doc,
-    subtotalPosition,
-    "",
-    "",
-    "Subtotal",
-    "",
-    formatCurrency(order.subtotal)
-  );
+    order.items.forEach((item) => {
+      if (currentY > 700) {
+        doc.addPage();
+        currentY = 50;
+      }
 
-  let currentPos = subtotalPosition + 20;
+      generateTableRow(
+        doc,
+        currentY,
+        item.nameSnapshot,
+        item.unit,
+        item.qty,
+        formatCurrency(item.pricePerUnitSnapshot),
+        formatCurrency(item.itemSubtotal)
+      );
+
+      generateHr(doc, currentY + 15);
+      currentY += 25;
+    });
+  }
+
+  return currentY;
+}
+
+function generateSummary(doc, order, y) {
+  let currentY = y + 20;
+
+  // Helper to draw right-aligned summary rows
+  const drawSummaryRow = (label, value, isBold = false, color = "#444444") => {
+    if (currentY > 750) {
+      doc.addPage();
+      currentY = 50;
+    }
+    doc
+      .font(isBold ? "Roboto-Bold" : "Roboto")
+      .fillColor(color)
+      .text(label, 350, currentY, { width: 100, align: "right" })
+      .text(value, 450, currentY, { width: 100, align: "right" });
+    currentY += 20;
+  };
+
+  drawSummaryRow("Subtotal:", formatCurrency(order.subtotal));
 
   if (order.additionalCharges > 0) {
-    generateTableRow(
-      doc,
-      currentPos,
-      "",
-      "",
-      "Add. Charges",
-      "",
-      formatCurrency(order.additionalCharges)
-    );
-    currentPos += 20;
+    drawSummaryRow("Addl. Charges:", formatCurrency(order.additionalCharges));
   }
 
   if (order.orderDiscount && order.orderDiscount.amount > 0) {
     const isPercent = order.orderDiscount.type === "percent";
     const discountLabel = isPercent
-      ? `Discount (${order.orderDiscount.amount}%)`
-      : "Discount";
+      ? `Discount (${order.orderDiscount.amount}%):`
+      : "Discount:";
 
+    // Calculate display value
     const discountVal = isPercent
       ? (order.subtotal * order.orderDiscount.amount) / 100
       : order.orderDiscount.amount;
 
-    doc.fillColor("#e53e3e");
-    generateTableRow(
-      doc,
-      currentPos,
-      "",
-      "",
+    drawSummaryRow(
       discountLabel,
-      "",
-      `-${formatCurrency(discountVal)}`
+      `- ${formatCurrency(discountVal)}`,
+      false,
+      "#e53e3e"
     );
-    doc.fillColor("#444444");
-    currentPos += 20;
   }
 
-  doc.font("Roboto-Bold"); // CHANGED from Helvetica-Bold
-  generateTableRow(
-    doc,
-    currentPos + 5,
-    "",
-    "",
-    "TOTAL",
-    "",
-    formatCurrency(order.total)
-  );
-  doc.font("Roboto"); // CHANGED from Helvetica
+  doc.text("", 350, currentY); // Spacer
+  currentY += 5;
+  doc
+    .strokeColor("#aaaaaa")
+    .lineWidth(1)
+    .moveTo(350, currentY)
+    .lineTo(550, currentY)
+    .stroke();
+  currentY += 10;
+
+  drawSummaryRow("GRAND TOTAL:", formatCurrency(order.total), true, "#fc8019");
+
+  // Notes section if exists
+  if (order.notes) {
+    currentY += 30;
+    if (currentY > 700) {
+      doc.addPage();
+      currentY = 50;
+    }
+    doc.font("Roboto-Bold").fillColor("#444444").text("Notes:", 50, currentY);
+    doc
+      .font("Roboto")
+      .fontSize(9)
+      .text(order.notes, 50, currentY + 15, { width: 500 });
+  }
 }
 
 function generateFooter(doc) {
-  doc.fontSize(10).text("Thank you for your business.", 50, 750, {
-    align: "center",
-    width: 500,
-  });
+  doc
+    .fontSize(10)
+    .fillColor("#aaaaaa")
+    .text("This is a computer generated quotation.", 50, 780, {
+      align: "center",
+      width: 500,
+    });
 }
 
 function generateTableRow(doc, y, item, unit, qty, price, total) {
@@ -249,5 +314,5 @@ function generateTableRow(doc, y, item, unit, qty, price, total) {
 }
 
 function generateHr(doc, y) {
-  doc.strokeColor("#aaaaaa").lineWidth(1).moveTo(50, y).lineTo(550, y).stroke();
+  doc.strokeColor("#eeeeee").lineWidth(1).moveTo(50, y).lineTo(550, y).stroke();
 }
